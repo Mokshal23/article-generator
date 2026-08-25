@@ -24,18 +24,45 @@ export default async function handler(req: any, res: any) {
         return res.status(404).json({ error: 'No cloud vault found yet for this ID' });
       }
 
-      // Fetch with Authorization header in case the blob store is private
-      const fetchUrl = targetBlob.downloadUrl || targetBlob.url;
-      const headers: Record<string, string> = {};
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
+      // Fetch the blob content using downloadUrl or direct URL with auth
+      let data = null;
+
+      // Try 1: Using downloadUrl (pre-signed by Vercel for private blobs)
+      if (targetBlob.downloadUrl) {
+        try {
+          const res = await fetch(targetBlob.downloadUrl);
+          if (res.ok) {
+            data = await res.json();
+          }
+        } catch (e) {}
       }
 
-      const response = await fetch(`${fetchUrl}?t=${Date.now()}`, { headers });
-      if (!response.ok) {
-        return res.status(response.status).json({ error: 'Failed to read from Blob storage' });
+      // Try 2: Using targetBlob.url with Bearer token
+      if (!data && targetBlob.url) {
+        try {
+          const res = await fetch(targetBlob.url, {
+            headers: token ? { Authorization: `Bearer ${token}` } : {}
+          });
+          if (res.ok) {
+            data = await res.json();
+          }
+        } catch (e) {}
       }
-      const data = await response.json();
+
+      // Try 3: Using direct unauthenticated URL (if store is public)
+      if (!data && targetBlob.url) {
+        try {
+          const res = await fetch(targetBlob.url);
+          if (res.ok) {
+            data = await res.json();
+          }
+        } catch (e) {}
+      }
+
+      if (!data) {
+        return res.status(502).json({ error: 'Unable to read blob content from storage' });
+      }
+
       return res.status(200).json(data);
     }
 
@@ -45,7 +72,7 @@ export default async function handler(req: any, res: any) {
         return res.status(400).json({ error: 'Invalid payload: articles array required' });
       }
 
-      // Delete existing blob to avoid stale records
+      // Clean up previous blob
       try {
         const { blobs } = await list({ prefix: pathname, token });
         for (const b of blobs) {
@@ -53,11 +80,9 @@ export default async function handler(req: any, res: any) {
             await del(b.url, { token }).catch(() => {});
           }
         }
-      } catch (e) {
-        // Ignore list/delete errors
-      }
+      } catch (e) {}
 
-      // Attempt put with 'private' access first (for private stores), fallback to 'public' if store is public
+      // Write blob: try private first, fallback to public
       let blob;
       try {
         blob = await put(pathname, JSON.stringify(payload), {
@@ -67,7 +92,6 @@ export default async function handler(req: any, res: any) {
           token,
         });
       } catch (privateErr: any) {
-        // If the store is public and rejected 'private', try 'public'
         blob = await put(pathname, JSON.stringify(payload), {
           access: 'public',
           addRandomSuffix: false,
