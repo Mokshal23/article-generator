@@ -17,7 +17,7 @@ import {
   saveReaderPrefs,
   getEffectiveApiKey,
 } from './services/storage';
-import { getStoredVaultId, saveStoredVaultId, pullFromVault, pushToVault } from './services/cloudSync';
+import { getStoredVaultId, syncWithVercelServer } from './services/cloudSync';
 
 export const App: React.FC = () => {
   const [articles, setArticles] = useState<Article[]>([]);
@@ -42,37 +42,12 @@ export const App: React.FC = () => {
     }
     setVocabList(getSavedVocab());
     setHasApiKey(!!getEffectiveApiKey());
-
-    // Check for ?vault= in URL (for 1-click connect on iPad)
-    const urlParams = new URLSearchParams(window.location.search);
-    const urlVault = urlParams.get('vault');
-    const activeVaultId = urlVault || getStoredVaultId();
-
-    if (urlVault) {
-      saveStoredVaultId(urlVault);
-      // clean URL
-      window.history.replaceState({}, document.title, window.location.pathname);
-    }
-
-    setVaultId(activeVaultId);
-
-    if (activeVaultId) {
-      pullFromVault(activeVaultId)
-        .then((res) => {
-          if (res && res.articles.length > 0) {
-            setArticles(res.articles);
-            setVocabList(res.vocab);
-            setCurrentArticle(res.articles[0]);
-          }
-        })
-        .catch((e) => console.warn('Initial sync failed:', e));
-    }
+    setVaultId(getStoredVaultId() || 'mokshal-vault');
   }, []);
 
   const refreshVocab = () => {
     const list = getSavedVocab();
     setVocabList(list);
-    if (vaultId) pushToVault(vaultId);
   };
 
   const handleUpdatePrefs = (newPrefs: ReaderPreferences) => {
@@ -87,7 +62,7 @@ export const App: React.FC = () => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
 
     if (vaultId) {
-      pushToVault(vaultId);
+      syncWithVercelServer(vaultId).catch(() => {});
     }
   };
 
@@ -98,7 +73,6 @@ export const App: React.FC = () => {
     if (currentArticle?.id === id) {
       setCurrentArticle(updated.length > 0 ? updated[0] : null);
     }
-    if (vaultId) pushToVault(vaultId);
   };
 
   const handleDeleteVocab = (id: string) => {
@@ -109,7 +83,6 @@ export const App: React.FC = () => {
   const handleSyncCompleted = (syncedArticles: Article[], syncedVocab: VocabItem[]) => {
     setArticles(syncedArticles);
     setVocabList(syncedVocab);
-    setVaultId(getStoredVaultId());
     if (syncedArticles.length > 0) {
       setCurrentArticle(syncedArticles[0]);
     }
@@ -198,6 +171,7 @@ export const App: React.FC = () => {
         isOpen={isSyncOpen}
         onClose={() => setIsSyncOpen(false)}
         onSyncCompleted={handleSyncCompleted}
+        articleCount={articles.length}
       />
     </div>
   );

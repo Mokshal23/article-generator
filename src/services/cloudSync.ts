@@ -1,14 +1,13 @@
 import type { Article, VocabItem } from '../types/article';
 import { getSavedArticles, getSavedVocab } from './storage';
 
-const VAULT_ID_KEY = 'aeoncat_vault_id_v2';
-const LAST_SYNC_KEY = 'aeoncat_last_sync_time_v2';
-const CLOUD_API_URL = 'https://api.restful-api.dev/objects';
+const VAULT_ID_KEY = 'aeoncat_vault_id_v3';
+const LAST_SYNC_KEY = 'aeoncat_last_sync_time_v3';
 
-export interface CloudVaultPayload {
+export interface VaultData {
   articles: Article[];
   vocab: VocabItem[];
-  updatedAt: number;
+  exportedAt: number;
 }
 
 export function getStoredVaultId(): string {
@@ -28,139 +27,105 @@ export function setLastSyncTime(t: number): void {
   localStorage.setItem(LAST_SYNC_KEY, t.toString());
 }
 
-// Create a new cloud vault
-export async function createNewVault(): Promise<string> {
-  const localArticles = getSavedArticles();
-  const localVocab = getSavedVocab();
-
-  const payload: CloudVaultPayload = {
-    articles: localArticles,
-    vocab: localVocab,
-    updatedAt: Date.now(),
+// Generate a full export JSON string
+export function exportVaultToString(): string {
+  const data: VaultData = {
+    articles: getSavedArticles(),
+    vocab: getSavedVocab(),
+    exportedAt: Date.now(),
   };
-
-  const res = await fetch(CLOUD_API_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      name: 'AeonCAT User Vault',
-      data: payload,
-    }),
-  });
-
-  if (!res.ok) {
-    throw new Error('Failed to create cloud vault. Please try again.');
-  }
-
-  const created = await res.json();
-  const vaultId = created.id;
-  saveStoredVaultId(vaultId);
-  setLastSyncTime(Date.now());
-  return vaultId;
+  return JSON.stringify(data);
 }
 
-// Push local data to existing vault
-export async function pushToVault(vaultId?: string): Promise<boolean> {
-  const id = vaultId || getStoredVaultId();
-  if (!id) return false;
+// Import from a raw JSON string and merge
+export function importVaultFromString(jsonStr: string): {
+  articles: Article[];
+  vocab: VocabItem[];
+  addedCount: number;
+} {
+  const parsed: VaultData = JSON.parse(jsonStr);
+  if (!parsed || !Array.isArray(parsed.articles)) {
+    throw new Error('Invalid vault JSON format.');
+  }
 
   const localArticles = getSavedArticles();
   const localVocab = getSavedVocab();
 
-  const payload: CloudVaultPayload = {
-    articles: localArticles,
-    vocab: localVocab,
-    updatedAt: Date.now(),
+  const articlesMap = new Map<string, Article>();
+  localArticles.forEach((a) => articlesMap.set(a.id, a));
+
+  let addedCount = 0;
+  parsed.articles.forEach((importedArt) => {
+    if (!articlesMap.has(importedArt.id)) {
+      addedCount++;
+      articlesMap.set(importedArt.id, importedArt);
+    } else {
+      // Overwrite if newer
+      const existing = articlesMap.get(importedArt.id);
+      if (importedArt.createdAt > (existing?.createdAt || 0)) {
+        articlesMap.set(importedArt.id, importedArt);
+      }
+    }
+  });
+
+  const mergedArticles = Array.from(articlesMap.values()).sort(
+    (a, b) => (b.createdAt || 0) - (a.createdAt || 0)
+  );
+
+  const vocabMap = new Map<string, VocabItem>();
+  localVocab.forEach((v) => vocabMap.set(v.word.toLowerCase(), v));
+  if (Array.isArray(parsed.vocab)) {
+    parsed.vocab.forEach((iv) => {
+      if (!vocabMap.has(iv.word.toLowerCase())) {
+        vocabMap.set(iv.word.toLowerCase(), iv);
+      }
+    });
+  }
+
+  const mergedVocab = Array.from(vocabMap.values()).sort(
+    (a, b) => (b.savedAt || 0) - (a.savedAt || 0)
+  );
+
+  localStorage.setItem('aeoncat_saved_articles_v1', JSON.stringify(mergedArticles));
+  localStorage.setItem('aeoncat_vocab_bank_v1', JSON.stringify(mergedVocab));
+  setLastSyncTime(Date.now());
+
+  return {
+    articles: mergedArticles,
+    vocab: mergedVocab,
+    addedCount,
   };
+}
+
+// Push to Vercel internal /api/sync endpoint
+export async function syncWithVercelServer(vaultId: string): Promise<VaultData | null> {
+  const localArticles = getSavedArticles();
+  const localVocab = getSavedVocab();
 
   try {
-    const res = await fetch(`${CLOUD_API_URL}/${id}`, {
-      method: 'PUT',
+    const postRes = await fetch(`/api/sync?vault=${encodeURIComponent(vaultId)}`, {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        name: 'AeonCAT User Vault',
-        data: payload,
+        vaultId,
+        articles: localArticles,
+        vocab: localVocab,
+        updatedAt: Date.now(),
       }),
     });
 
-    if (res.ok) {
+    if (postRes.ok) {
       setLastSyncTime(Date.now());
-      return true;
+      saveStoredVaultId(vaultId);
+      return {
+        articles: localArticles,
+        vocab: localVocab,
+        exportedAt: Date.now(),
+      };
     }
   } catch (err) {
-    console.warn('Cloud sync push failed:', err);
+    console.warn('Vercel serverless sync note:', err);
   }
-  return false;
-}
 
-// Pull cloud data from vault and merge
-export async function pullFromVault(vaultId?: string): Promise<{
-  articles: Article[];
-  vocab: VocabItem[];
-} | null> {
-  const id = vaultId || getStoredVaultId();
-  if (!id) return null;
-
-  try {
-    const res = await fetch(`${CLOUD_API_URL}/${id}`);
-    if (!res.ok) {
-      throw new Error(`Vault not found or expired (HTTP ${res.status})`);
-    }
-
-    const json = await res.json();
-    const cloudPayload: CloudVaultPayload = json.data;
-
-    if (!cloudPayload || !Array.isArray(cloudPayload.articles)) {
-      return null;
-    }
-
-    const localArticles = getSavedArticles();
-    const localVocab = getSavedVocab();
-
-    // 1. Merge articles by ID
-    const mergedArticlesMap = new Map<string, Article>();
-    localArticles.forEach((a) => mergedArticlesMap.set(a.id, a));
-    cloudPayload.articles.forEach((ca) => {
-      const existing = mergedArticlesMap.get(ca.id);
-      if (!existing || (ca.createdAt && ca.createdAt > (existing.createdAt || 0))) {
-        mergedArticlesMap.set(ca.id, ca);
-      }
-    });
-
-    const mergedArticles = Array.from(mergedArticlesMap.values()).sort(
-      (a, b) => (b.createdAt || 0) - (a.createdAt || 0)
-    );
-
-    // 2. Merge vocab
-    const mergedVocabMap = new Map<string, VocabItem>();
-    localVocab.forEach((v) => mergedVocabMap.set(v.word.toLowerCase(), v));
-    if (Array.isArray(cloudPayload.vocab)) {
-      cloudPayload.vocab.forEach((cv) => {
-        if (!mergedVocabMap.has(cv.word.toLowerCase())) {
-          mergedVocabMap.set(cv.word.toLowerCase(), cv);
-        }
-      });
-    }
-
-    const mergedVocab = Array.from(mergedVocabMap.values()).sort(
-      (a, b) => (b.savedAt || 0) - (a.savedAt || 0)
-    );
-
-    // Persist locally
-    localStorage.setItem('aeoncat_saved_articles_v1', JSON.stringify(mergedArticles));
-    localStorage.setItem('aeoncat_vocab_bank_v1', JSON.stringify(mergedVocab));
-    saveStoredVaultId(id);
-    setLastSyncTime(Date.now());
-
-    // Push back merged state
-    await pushToVault(id);
-
-    return {
-      articles: mergedArticles,
-      vocab: mergedVocab,
-    };
-  } catch (err: any) {
-    console.warn('Cloud sync pull failed:', err);
-    throw err;
-  }
+  return null;
 }
