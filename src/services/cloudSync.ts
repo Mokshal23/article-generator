@@ -1,24 +1,22 @@
 import type { Article, VocabItem } from '../types/article';
 import { getSavedArticles, getSavedVocab } from './storage';
 
-const SYNC_CODE_KEY = 'aeoncat_sync_code_v1';
-const LAST_SYNC_KEY = 'aeoncat_last_sync_timestamp';
+const VAULT_ID_KEY = 'aeoncat_vault_id_v2';
+const LAST_SYNC_KEY = 'aeoncat_last_sync_time_v2';
+const CLOUD_API_URL = 'https://api.restful-api.dev/objects';
 
-// Multi-endpoint cloud vault endpoints for high reliability
-const CLOUD_SYNC_URL = 'https://kvdb.io/Ank8e24VzFvE7k4gT12345/';
-
-export interface SyncPayload {
+export interface CloudVaultPayload {
   articles: Article[];
   vocab: VocabItem[];
   updatedAt: number;
 }
 
-export function getStoredSyncCode(): string {
-  return localStorage.getItem(SYNC_CODE_KEY) || '';
+export function getStoredVaultId(): string {
+  return localStorage.getItem(VAULT_ID_KEY) || '';
 }
 
-export function saveStoredSyncCode(code: string): void {
-  localStorage.setItem(SYNC_CODE_KEY, code.trim().toLowerCase());
+export function saveStoredVaultId(id: string): void {
+  localStorage.setItem(VAULT_ID_KEY, id.trim());
 }
 
 export function getLastSyncTime(): number {
@@ -30,31 +28,59 @@ export function setLastSyncTime(t: number): void {
   localStorage.setItem(LAST_SYNC_KEY, t.toString());
 }
 
-// Hash code to safe alphanumeric key
-function getVaultKey(code: string): string {
-  const clean = code.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
-  return 'vault_' + clean;
-}
-
-// Upload local data to cloud vault
-export async function pushToCloudVault(code: string): Promise<boolean> {
-  if (!code || !code.trim()) return false;
-
-  const key = getVaultKey(code);
+// Create a new cloud vault
+export async function createNewVault(): Promise<string> {
   const localArticles = getSavedArticles();
   const localVocab = getSavedVocab();
 
-  const payload: SyncPayload = {
+  const payload: CloudVaultPayload = {
+    articles: localArticles,
+    vocab: localVocab,
+    updatedAt: Date.now(),
+  };
+
+  const res = await fetch(CLOUD_API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: 'AeonCAT User Vault',
+      data: payload,
+    }),
+  });
+
+  if (!res.ok) {
+    throw new Error('Failed to create cloud vault. Please try again.');
+  }
+
+  const created = await res.json();
+  const vaultId = created.id;
+  saveStoredVaultId(vaultId);
+  setLastSyncTime(Date.now());
+  return vaultId;
+}
+
+// Push local data to existing vault
+export async function pushToVault(vaultId?: string): Promise<boolean> {
+  const id = vaultId || getStoredVaultId();
+  if (!id) return false;
+
+  const localArticles = getSavedArticles();
+  const localVocab = getSavedVocab();
+
+  const payload: CloudVaultPayload = {
     articles: localArticles,
     vocab: localVocab,
     updatedAt: Date.now(),
   };
 
   try {
-    const res = await fetch(`${CLOUD_SYNC_URL}${encodeURIComponent(key)}`, {
-      method: 'POST',
+    const res = await fetch(`${CLOUD_API_URL}/${id}`, {
+      method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        name: 'AeonCAT User Vault',
+        data: payload,
+      }),
     });
 
     if (res.ok) {
@@ -62,48 +88,39 @@ export async function pushToCloudVault(code: string): Promise<boolean> {
       return true;
     }
   } catch (err) {
-    console.warn('Cloud sync push error:', err);
+    console.warn('Cloud sync push failed:', err);
   }
   return false;
 }
 
-// Pull cloud data and merge with local data
-export async function pullFromCloudVault(code: string): Promise<{
+// Pull cloud data from vault and merge
+export async function pullFromVault(vaultId?: string): Promise<{
   articles: Article[];
   vocab: VocabItem[];
-  updated: boolean;
 } | null> {
-  if (!code || !code.trim()) return null;
-
-  const key = getVaultKey(code);
+  const id = vaultId || getStoredVaultId();
+  if (!id) return null;
 
   try {
-    const res = await fetch(`${CLOUD_SYNC_URL}${encodeURIComponent(key)}?t=${Date.now()}`);
+    const res = await fetch(`${CLOUD_API_URL}/${id}`);
     if (!res.ok) {
-      // If vault does not exist yet in cloud, create it by pushing current local data
-      if (res.status === 404) {
-        await pushToCloudVault(code);
-        return {
-          articles: getSavedArticles(),
-          vocab: getSavedVocab(),
-          updated: false,
-        };
-      }
-      return null;
+      throw new Error(`Vault not found or expired (HTTP ${res.status})`);
     }
 
-    const cloudData: SyncPayload = await res.json();
-    if (!cloudData || !Array.isArray(cloudData.articles)) return null;
+    const json = await res.json();
+    const cloudPayload: CloudVaultPayload = json.data;
+
+    if (!cloudPayload || !Array.isArray(cloudPayload.articles)) {
+      return null;
+    }
 
     const localArticles = getSavedArticles();
     const localVocab = getSavedVocab();
 
     // 1. Merge articles by ID
     const mergedArticlesMap = new Map<string, Article>();
-    // First insert local
     localArticles.forEach((a) => mergedArticlesMap.set(a.id, a));
-    // Merge or update with cloud
-    cloudData.articles.forEach((ca) => {
+    cloudPayload.articles.forEach((ca) => {
       const existing = mergedArticlesMap.get(ca.id);
       if (!existing || (ca.createdAt && ca.createdAt > (existing.createdAt || 0))) {
         mergedArticlesMap.set(ca.id, ca);
@@ -114,11 +131,11 @@ export async function pullFromCloudVault(code: string): Promise<{
       (a, b) => (b.createdAt || 0) - (a.createdAt || 0)
     );
 
-    // 2. Merge vocab by word
+    // 2. Merge vocab
     const mergedVocabMap = new Map<string, VocabItem>();
     localVocab.forEach((v) => mergedVocabMap.set(v.word.toLowerCase(), v));
-    if (Array.isArray(cloudData.vocab)) {
-      cloudData.vocab.forEach((cv) => {
+    if (Array.isArray(cloudPayload.vocab)) {
+      cloudPayload.vocab.forEach((cv) => {
         if (!mergedVocabMap.has(cv.word.toLowerCase())) {
           mergedVocabMap.set(cv.word.toLowerCase(), cv);
         }
@@ -129,21 +146,21 @@ export async function pullFromCloudVault(code: string): Promise<{
       (a, b) => (b.savedAt || 0) - (a.savedAt || 0)
     );
 
-    // Save merged results locally
+    // Persist locally
     localStorage.setItem('aeoncat_saved_articles_v1', JSON.stringify(mergedArticles));
     localStorage.setItem('aeoncat_vocab_bank_v1', JSON.stringify(mergedVocab));
+    saveStoredVaultId(id);
     setLastSyncTime(Date.now());
 
-    // Push back merged union so both devices stay completely synchronized
-    await pushToCloudVault(code);
+    // Push back merged state
+    await pushToVault(id);
 
     return {
       articles: mergedArticles,
       vocab: mergedVocab,
-      updated: true,
     };
-  } catch (err) {
-    console.warn('Cloud sync pull error:', err);
+  } catch (err: any) {
+    console.warn('Cloud sync pull failed:', err);
+    throw err;
   }
-  return null;
 }
