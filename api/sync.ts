@@ -1,5 +1,4 @@
-// Vercel Serverless Sync Handler
-const vaults = new Map<string, any>();
+import { put, list, del } from '@vercel/blob';
 
 export default async function handler(req: any, res: any) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -11,27 +10,58 @@ export default async function handler(req: any, res: any) {
   }
 
   const { vault } = req.query;
-  const vaultId = (vault || req.body?.vaultId || 'default').toString().trim().toLowerCase();
+  const rawId = (vault || req.body?.vaultId || 'default').toString().trim().toLowerCase();
+  const vaultId = rawId.replace(/[^a-z0-9_-]/g, '') || 'default';
+  const pathname = `aeoncat_vaults/${vaultId}.json`;
 
-  if (req.method === 'GET') {
-    const data = vaults.get(vaultId);
-    if (!data) {
-      return res.status(404).json({ error: 'Vault not found' });
+  try {
+    if (req.method === 'GET') {
+      const { blobs } = await list({ prefix: pathname });
+      const targetBlob = blobs.find(b => b.pathname === pathname);
+
+      if (!targetBlob) {
+        return res.status(404).json({ error: 'No cloud vault found yet for this ID' });
+      }
+
+      const response = await fetch(`${targetBlob.url}?t=${Date.now()}`);
+      if (!response.ok) {
+        return res.status(response.status).json({ error: 'Failed to read from Blob storage' });
+      }
+      const data = await response.json();
+      return res.status(200).json(data);
     }
-    return res.status(200).json(data);
-  }
 
-  if (req.method === 'POST' || req.method === 'PUT') {
-    const body = req.body;
-    if (!body) {
-      return res.status(400).json({ error: 'No data provided' });
+    if (req.method === 'POST' || req.method === 'PUT') {
+      const payload = req.body;
+      if (!payload || !Array.isArray(payload.articles)) {
+        return res.status(400).json({ error: 'Invalid payload: articles array required' });
+      }
+
+      // Delete existing blob to avoid stale records
+      const { blobs } = await list({ prefix: pathname });
+      for (const b of blobs) {
+        if (b.pathname === pathname) {
+          await del(b.url).catch(() => {});
+        }
+      }
+
+      const blob = await put(pathname, JSON.stringify(payload), {
+        access: 'public',
+        addRandomSuffix: false,
+        contentType: 'application/json',
+      });
+
+      return res.status(200).json({
+        ok: true,
+        vaultId,
+        url: blob.url,
+        updatedAt: Date.now(),
+      });
     }
-    vaults.set(vaultId, {
-      ...body,
-      updatedAt: Date.now()
-    });
-    return res.status(200).json({ ok: true, vaultId, updatedAt: Date.now() });
-  }
 
-  return res.status(405).json({ error: 'Method not allowed' });
+    return res.status(405).json({ error: 'Method not allowed' });
+  } catch (err: any) {
+    console.error('Vercel Blob sync error:', err);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
+  }
 }

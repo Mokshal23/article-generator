@@ -17,7 +17,7 @@ import {
   saveReaderPrefs,
   getEffectiveApiKey,
 } from './services/storage';
-import { getStoredVaultId, syncWithVercelServer } from './services/cloudSync';
+import { getStoredVaultId, pullFromCloudBlob, pushToCloudBlob } from './services/cloudSync';
 
 export const App: React.FC = () => {
   const [articles, setArticles] = useState<Article[]>([]);
@@ -25,7 +25,7 @@ export const App: React.FC = () => {
   const [vocabList, setVocabList] = useState<VocabItem[]>([]);
   const [prefs, setPrefs] = useState<ReaderPreferences>(getReaderPrefs());
   const [hasApiKey, setHasApiKey] = useState(false);
-  const [vaultId, setVaultId] = useState('');
+  const [vaultId, setVaultId] = useState('mokshal-vault');
 
   const [isNewArticleOpen, setIsNewArticleOpen] = useState(false);
   const [isLibraryOpen, setIsLibraryOpen] = useState(false);
@@ -33,6 +33,19 @@ export const App: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isApiKeyOpen, setIsApiKeyOpen] = useState(false);
   const [isSyncOpen, setIsSyncOpen] = useState(false);
+
+  // Background sync helper
+  const performAutoSync = (activeId: string) => {
+    pullFromCloudBlob(activeId)
+      .then((res) => {
+        if (res && res.articles.length > 0) {
+          setArticles(res.articles);
+          setVocabList(res.vocab);
+          setCurrentArticle((prev) => prev || res.articles[0]);
+        }
+      })
+      .catch((e) => console.warn('Auto-sync notice:', e));
+  };
 
   useEffect(() => {
     const saved = getSavedArticles();
@@ -42,12 +55,23 @@ export const App: React.FC = () => {
     }
     setVocabList(getSavedVocab());
     setHasApiKey(!!getEffectiveApiKey());
-    setVaultId(getStoredVaultId() || 'mokshal-vault');
+
+    const activeId = getStoredVaultId() || 'mokshal-vault';
+    setVaultId(activeId);
+
+    // Initial background pull & merge on load
+    performAutoSync(activeId);
+
+    // Auto sync whenever window is refocused (e.g. switching back to iPad or Desktop)
+    const handleFocus = () => performAutoSync(activeId);
+    window.addEventListener('focus', handleFocus);
+    return () => window.removeEventListener('focus', handleFocus);
   }, []);
 
   const refreshVocab = () => {
     const list = getSavedVocab();
     setVocabList(list);
+    pushToCloudBlob(vaultId).catch(() => {});
   };
 
   const handleUpdatePrefs = (newPrefs: ReaderPreferences) => {
@@ -61,9 +85,8 @@ export const App: React.FC = () => {
     setCurrentArticle(newArticle);
     window.scrollTo({ top: 0, behavior: 'smooth' });
 
-    if (vaultId) {
-      syncWithVercelServer(vaultId).catch(() => {});
-    }
+    // Instantly upload newly generated article to Vercel Blob
+    pushToCloudBlob(vaultId).catch(() => {});
   };
 
   const handleDeleteArticle = (id: string) => {
@@ -73,6 +96,7 @@ export const App: React.FC = () => {
     if (currentArticle?.id === id) {
       setCurrentArticle(updated.length > 0 ? updated[0] : null);
     }
+    pushToCloudBlob(vaultId).catch(() => {});
   };
 
   const handleDeleteVocab = (id: string) => {
@@ -83,6 +107,7 @@ export const App: React.FC = () => {
   const handleSyncCompleted = (syncedArticles: Article[], syncedVocab: VocabItem[]) => {
     setArticles(syncedArticles);
     setVocabList(syncedVocab);
+    setVaultId(getStoredVaultId());
     if (syncedArticles.length > 0) {
       setCurrentArticle(syncedArticles[0]);
     }
@@ -102,7 +127,7 @@ export const App: React.FC = () => {
         onOpenApiKey={() => setIsApiKeyOpen(true)}
         onOpenSync={() => setIsSyncOpen(true)}
         hasApiKey={hasApiKey}
-        hasSyncCode={!!vaultId}
+        hasSyncCode={true}
         vocabCount={vocabList.length}
       />
 
