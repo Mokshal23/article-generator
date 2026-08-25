@@ -17,12 +17,13 @@ export default async function handler(req: any, res: any) {
 
   try {
     if (req.method === 'GET') {
-      // 1. Try reading with private access
       let blobResult = null;
+
+      // 1. Try reading with private access
       try {
         blobResult = await get(pathname, { access: 'private', token });
       } catch (e) {
-        // Fallback to public
+        // 2. Try reading with public access if store is public
         try {
           blobResult = await get(pathname, { access: 'public', token });
         } catch (e2) {}
@@ -53,28 +54,38 @@ export default async function handler(req: any, res: any) {
         }
       } catch (e) {}
 
-      // Write blob: try private access first, fallback to public
+      // Write blob without forcing access: 'public' (inherits store's configured access)
       let blob;
       try {
         blob = await put(pathname, JSON.stringify(payload), {
-          access: 'private',
           addRandomSuffix: false,
           contentType: 'application/json',
           token,
         });
-      } catch (privateErr: any) {
-        blob = await put(pathname, JSON.stringify(payload), {
-          access: 'public',
-          addRandomSuffix: false,
-          contentType: 'application/json',
-          token,
-        });
+      } catch (err1) {
+        // Try with explicit private access
+        try {
+          blob = await put(pathname, JSON.stringify(payload), {
+            access: 'private',
+            addRandomSuffix: false,
+            contentType: 'application/json',
+            token,
+          });
+        } catch (err2) {
+          // Last fallback
+          blob = await put(pathname, JSON.stringify(payload), {
+            access: 'public',
+            addRandomSuffix: false,
+            contentType: 'application/json',
+            token,
+          });
+        }
       }
 
       return res.status(200).json({
         ok: true,
         vaultId,
-        url: blob.url,
+        url: blob?.url,
         updatedAt: Date.now(),
       });
     }
