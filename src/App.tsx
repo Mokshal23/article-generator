@@ -6,6 +6,7 @@ import { LibraryDrawer } from './components/LibraryDrawer';
 import { VocabBankModal } from './components/VocabBankModal';
 import { ReaderSettingsModal } from './components/ReaderSettingsModal';
 import { ApiKeyModal } from './components/ApiKeyModal';
+import { SyncModal } from './components/SyncModal';
 import type { Article, ReaderPreferences, VocabItem } from './types/article';
 import {
   getSavedArticles,
@@ -16,6 +17,7 @@ import {
   saveReaderPrefs,
   getEffectiveApiKey,
 } from './services/storage';
+import { getStoredSyncCode, pullFromCloudVault, pushToCloudVault } from './services/cloudSync';
 
 export const App: React.FC = () => {
   const [articles, setArticles] = useState<Article[]>([]);
@@ -23,12 +25,14 @@ export const App: React.FC = () => {
   const [vocabList, setVocabList] = useState<VocabItem[]>([]);
   const [prefs, setPrefs] = useState<ReaderPreferences>(getReaderPrefs());
   const [hasApiKey, setHasApiKey] = useState(false);
+  const [syncCode, setSyncCode] = useState('');
 
   const [isNewArticleOpen, setIsNewArticleOpen] = useState(false);
   const [isLibraryOpen, setIsLibraryOpen] = useState(false);
   const [isVocabOpen, setIsVocabOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isApiKeyOpen, setIsApiKeyOpen] = useState(false);
+  const [isSyncOpen, setIsSyncOpen] = useState(false);
 
   useEffect(() => {
     const saved = getSavedArticles();
@@ -38,10 +42,27 @@ export const App: React.FC = () => {
     }
     setVocabList(getSavedVocab());
     setHasApiKey(!!getEffectiveApiKey());
+
+    // Auto sync if sync code exists
+    const code = getStoredSyncCode();
+    setSyncCode(code);
+    if (code) {
+      pullFromCloudVault(code).then((res) => {
+        if (res && res.updated) {
+          setArticles(res.articles);
+          setVocabList(res.vocab);
+          if (res.articles.length > 0) {
+            setCurrentArticle(res.articles[0]);
+          }
+        }
+      });
+    }
   }, []);
 
   const refreshVocab = () => {
-    setVocabList(getSavedVocab());
+    const list = getSavedVocab();
+    setVocabList(list);
+    if (syncCode) pushToCloudVault(syncCode);
   };
 
   const handleUpdatePrefs = (newPrefs: ReaderPreferences) => {
@@ -54,6 +75,11 @@ export const App: React.FC = () => {
     setArticles(updated);
     setCurrentArticle(newArticle);
     window.scrollTo({ top: 0, behavior: 'smooth' });
+
+    // Push new article to cloud vault immediately
+    if (syncCode) {
+      pushToCloudVault(syncCode);
+    }
   };
 
   const handleDeleteArticle = (id: string) => {
@@ -63,11 +89,21 @@ export const App: React.FC = () => {
     if (currentArticle?.id === id) {
       setCurrentArticle(updated.length > 0 ? updated[0] : null);
     }
+    if (syncCode) pushToCloudVault(syncCode);
   };
 
   const handleDeleteVocab = (id: string) => {
     deleteVocabItem(id);
     refreshVocab();
+  };
+
+  const handleSyncCompleted = (syncedArticles: Article[], syncedVocab: VocabItem[]) => {
+    setArticles(syncedArticles);
+    setVocabList(syncedVocab);
+    setSyncCode(getStoredSyncCode());
+    if (syncedArticles.length > 0) {
+      setCurrentArticle(syncedArticles[0]);
+    }
   };
 
   return (
@@ -82,7 +118,9 @@ export const App: React.FC = () => {
         }}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onOpenApiKey={() => setIsApiKeyOpen(true)}
+        onOpenSync={() => setIsSyncOpen(true)}
         hasApiKey={hasApiKey}
+        hasSyncCode={!!syncCode}
         vocabCount={vocabList.length}
       />
 
@@ -145,6 +183,12 @@ export const App: React.FC = () => {
         isOpen={isApiKeyOpen}
         onClose={() => setIsApiKeyOpen(false)}
         onKeySaved={() => setHasApiKey(!!getEffectiveApiKey())}
+      />
+
+      <SyncModal
+        isOpen={isSyncOpen}
+        onClose={() => setIsSyncOpen(false)}
+        onSyncCompleted={handleSyncCompleted}
       />
     </div>
   );

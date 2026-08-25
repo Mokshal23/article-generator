@@ -1,5 +1,5 @@
 import React from 'react';
-import { BookOpen, Plus, Bookmark, BookA, SlidersHorizontal, KeyRound } from 'lucide-react';
+import { BookOpen, Plus, Bookmark, BookA, SlidersHorizontal, KeyRound, Cloud } from 'lucide-react';
 import type { Article } from '../types/article';
 
 interface NavbarProps {
@@ -9,7 +9,9 @@ interface NavbarProps {
   onOpenVocab: () => void;
   onOpenSettings: () => void;
   onOpenApiKey: () => void;
+  onOpenSync: () => void;
   hasApiKey: boolean;
+  hasSyncCode: boolean;
   vocabCount: number;
 }
 
@@ -20,7 +22,9 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenVocab,
   onOpenSettings,
   onOpenApiKey,
+  onOpenSync,
   hasApiKey,
+  hasSyncCode,
   vocabCount,
 }) => {
   return (
@@ -83,6 +87,22 @@ export const Navbar: React.FC<NavbarProps> = ({
             )}
           </button>
 
+          {/* Cloud Sync Button */}
+          <button
+            onClick={onOpenSync}
+            title={hasSyncCode ? 'Cross-Device Sync Active' : 'Connect Cross-Device Sync'}
+            className={'relative p-2 rounded-md transition-colors ' + (
+              hasSyncCode
+                ? 'text-emerald-400/90 hover:text-emerald-300 hover:bg-emerald-950/20'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-[#161822]'
+            )}
+          >
+            <Cloud className="w-3.5 h-3.5" strokeWidth={1.5} />
+            {hasSyncCode && (
+              <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            )}
+          </button>
+
           <button
             onClick={onOpenSettings}
             title="Reading Preferences"
@@ -93,7 +113,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={onOpenApiKey}
-            title={hasApiKey ? 'Gemini API Key Configured' : 'Configure Gemini API Key'}
+            title={hasApiKey ? 'Gemini API Key Connected' : 'Configure Gemini API Key'}
             className={'p-2 rounded-md transition-colors ' + (
               hasApiKey
                 ? 'text-slate-400 hover:text-slate-200 hover:bg-[#161822]'
