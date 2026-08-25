@@ -1,4 +1,4 @@
-import { put, list, del } from '@vercel/blob';
+import { put, get, list, del } from '@vercel/blob';
 
 export default async function handler(req: any, res: any) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -17,52 +17,23 @@ export default async function handler(req: any, res: any) {
 
   try {
     if (req.method === 'GET') {
-      const { blobs } = await list({ prefix: pathname, token });
-      const targetBlob = blobs.find(b => b.pathname === pathname);
+      // 1. Try reading with private access
+      let blobResult = null;
+      try {
+        blobResult = await get(pathname, { access: 'private', token });
+      } catch (e) {
+        // Fallback to public
+        try {
+          blobResult = await get(pathname, { access: 'public', token });
+        } catch (e2) {}
+      }
 
-      if (!targetBlob) {
+      if (!blobResult || !blobResult.stream) {
         return res.status(404).json({ error: 'No cloud vault found yet for this ID' });
       }
 
-      // Fetch the blob content using downloadUrl or direct URL with auth
-      let data = null;
-
-      // Try 1: Using downloadUrl (pre-signed by Vercel for private blobs)
-      if (targetBlob.downloadUrl) {
-        try {
-          const res = await fetch(targetBlob.downloadUrl);
-          if (res.ok) {
-            data = await res.json();
-          }
-        } catch (e) {}
-      }
-
-      // Try 2: Using targetBlob.url with Bearer token
-      if (!data && targetBlob.url) {
-        try {
-          const res = await fetch(targetBlob.url, {
-            headers: token ? { Authorization: `Bearer ${token}` } : {}
-          });
-          if (res.ok) {
-            data = await res.json();
-          }
-        } catch (e) {}
-      }
-
-      // Try 3: Using direct unauthenticated URL (if store is public)
-      if (!data && targetBlob.url) {
-        try {
-          const res = await fetch(targetBlob.url);
-          if (res.ok) {
-            data = await res.json();
-          }
-        } catch (e) {}
-      }
-
-      if (!data) {
-        return res.status(502).json({ error: 'Unable to read blob content from storage' });
-      }
-
+      const rawText = await new Response(blobResult.stream as any).text();
+      const data = JSON.parse(rawText);
       return res.status(200).json(data);
     }
 
@@ -72,7 +43,7 @@ export default async function handler(req: any, res: any) {
         return res.status(400).json({ error: 'Invalid payload: articles array required' });
       }
 
-      // Clean up previous blob
+      // Clean up previous blob if exists
       try {
         const { blobs } = await list({ prefix: pathname, token });
         for (const b of blobs) {
@@ -82,7 +53,7 @@ export default async function handler(req: any, res: any) {
         }
       } catch (e) {}
 
-      // Write blob: try private first, fallback to public
+      // Write blob: try private access first, fallback to public
       let blob;
       try {
         blob = await put(pathname, JSON.stringify(payload), {
