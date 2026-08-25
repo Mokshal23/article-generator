@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { X, RefreshCw, Check, Cloud, Database, CheckCircle2 } from 'lucide-react';
+import { X, RefreshCw, Cloud, Database, CheckCircle2, AlertTriangle, Globe } from 'lucide-react';
 import {
   getStoredVaultId,
   saveStoredVaultId,
+  getStoredSyncHost,
+  saveStoredSyncHost,
   pullFromCloudBlob,
   pushToCloudBlob,
   getLastSyncTime,
@@ -23,13 +25,17 @@ export const SyncModal: React.FC<SyncModalProps> = ({
   articleCount,
 }) => {
   const [vaultId, setVaultId] = useState('mokshal-vault');
+  const [syncHost, setSyncHost] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
-  const [syncSuccess, setSyncSuccess] = useState(false);
+  const [syncSuccessMsg, setSyncSuccessMsg] = useState('');
   const [lastSync, setLastSync] = useState<number>(0);
   const [errorMsg, setErrorMsg] = useState('');
 
+  const isLocalhost = typeof window !== 'undefined' && window.location.hostname === 'localhost';
+
   useEffect(() => {
     setVaultId(getStoredVaultId() || 'mokshal-vault');
+    setSyncHost(getStoredSyncHost());
     setLastSync(getLastSyncTime());
   }, [isOpen]);
 
@@ -38,20 +44,31 @@ export const SyncModal: React.FC<SyncModalProps> = ({
   const handleSyncNow = async () => {
     setIsSyncing(true);
     setErrorMsg('');
+    setSyncSuccessMsg('');
+
     try {
       saveStoredVaultId(vaultId);
-      // Push first to make sure current device data is in Blob
-      await pushToCloudBlob(vaultId);
+      saveStoredSyncHost(syncHost);
+
+      // Push first
+      const pushRes = await pushToCloudBlob(vaultId);
+      if (!pushRes.ok) {
+        throw new Error(pushRes.message || 'Push to cloud failed');
+      }
+
       // Then pull and merge
       const result = await pullFromCloudBlob(vaultId);
       if (result) {
-        setSyncSuccess(true);
+        setSyncSuccessMsg(result.message || 'Synced successfully with Vercel Blob!');
         setLastSync(Date.now());
         onSyncCompleted(result.articles, result.vocab);
-        setTimeout(() => setSyncSuccess(false), 2000);
       }
     } catch (err: any) {
-      setErrorMsg(err.message || 'Sync failed.');
+      if (isLocalhost && !syncHost) {
+        setErrorMsg('You are on localhost. To sync from localhost, paste your deployed Vercel URL below (e.g. https://article-generator-...vercel.app). Or simply open your Vercel URL in your desktop browser!');
+      } else {
+        setErrorMsg(err.message || 'Sync failed. Please check your connection.');
+      }
     } finally {
       setIsSyncing(false);
     }
@@ -82,21 +99,31 @@ export const SyncModal: React.FC<SyncModalProps> = ({
           </button>
         </div>
 
+        {/* Localhost Notice if applicable */}
+        {isLocalhost && (
+          <div className="p-3 rounded-lg bg-[#1a1710] border border-amber-900/50 flex items-start gap-2.5 text-xs text-amber-300 font-light leading-relaxed">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-normal text-amber-200">You are on localhost:</span> Open your live <strong>Vercel URL</strong> on your desktop so all your desktop essays automatically sync to your iPad via Vercel Blob!
+            </div>
+          </div>
+        )}
+
         {/* Status Indicator */}
         <div className="p-3 rounded-lg bg-[#101b17] border border-emerald-900/50 flex items-center gap-2.5 text-xs text-emerald-300 font-light">
           <Database className="w-4 h-4 text-emerald-400 shrink-0" />
           <div>
-            <div className="font-normal text-emerald-200">Vercel Blob Storage Connected</div>
+            <div className="font-normal text-emerald-200">Vercel Blob Storage Active</div>
             <div className="text-[11px] text-emerald-400/80">
-              Articles and vocabulary sync automatically in the background across all your devices.
+              {articleCount} essays saved on this device.
             </div>
           </div>
         </div>
 
-        {syncSuccess && (
+        {syncSuccessMsg && (
           <div className="p-2.5 rounded-lg bg-emerald-950/40 border border-emerald-800/60 flex items-center gap-2 text-xs text-emerald-300 font-light">
             <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-            <span>Synced successfully with Vercel Blob!</span>
+            <span>{syncSuccessMsg}</span>
           </div>
         )}
 
@@ -119,13 +146,25 @@ export const SyncModal: React.FC<SyncModalProps> = ({
               placeholder="mokshal-vault"
               className="w-full bg-[#11131b] border border-[#1e2230] rounded-lg px-3 py-2 text-xs text-slate-100 font-mono"
             />
-            <p className="mt-1 text-[11px] text-slate-500 font-light">
-              Both your Desktop and iPad share this Vault ID: <code>{vaultId}</code>.
-            </p>
           </div>
 
+          {isLocalhost && (
+            <div>
+              <label className="block text-xs text-slate-400 font-light mb-1 flex items-center gap-1">
+                <Globe className="w-3 h-3 text-slate-400" />
+                <span>Vercel App URL (for localhost sync)</span>
+              </label>
+              <input
+                type="text"
+                value={syncHost}
+                onChange={(e) => setSyncHost(e.target.value)}
+                placeholder="https://article-generator-....vercel.app"
+                className="w-full bg-[#11131b] border border-[#1e2230] rounded-lg px-3 py-2 text-xs text-slate-100 font-mono"
+              />
+            </div>
+          )}
+
           <div className="flex items-center justify-between text-xs text-slate-500 font-light pt-1">
-            <span>Library: {articleCount} essays</span>
             <span>Last sync: {formatTime(lastSync)}</span>
           </div>
         </div>
@@ -149,11 +188,6 @@ export const SyncModal: React.FC<SyncModalProps> = ({
               <>
                 <RefreshCw className="w-3.5 h-3.5 animate-spin text-slate-300" />
                 <span>Syncing...</span>
-              </>
-            ) : syncSuccess ? (
-              <>
-                <Check className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Synced!</span>
               </>
             ) : (
               <>
